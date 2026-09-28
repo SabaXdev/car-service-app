@@ -1,0 +1,21 @@
+{
+  "[development]": {
+    "auth": {
+      "kind": "mocked",
+      "users": {
+        "admin": {
+          "password": "admin",
+          "roles": ["Admin"]
+        },
+        "advisor": {
+          "password": "advisor",
+          "roles": ["ServiceAdvisor"]
+        },
+        "mechanic1": {
+          "password": "mechanic",
+          "roles": ["Mechanic"]
+        }
+      }
+    }
+  }
+}

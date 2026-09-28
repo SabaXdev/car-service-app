@@ -1,0 +1,152 @@
+{
+  "_version": "1.65.0",
+  "sap.app": {
+    "id": "serviceorders",
+    "type": "application",
+    "i18n": {
+      "bundleUrl": "i18n/i18n.properties",
+      "supportedLocales": [
+        "",
+        "en"
+      ],
+      "fallbackLocale": ""
+    },
+    "applicationVersion": {
+      "version": "1.0.0"
+    },
+    "title": "{{appTitle}}",
+    "description": "{{appDescription}}",
+    "dataSources": {
+      "mainService": {
+        "uri": "/odata/v4/CarService/",
+        "type": "OData",
+        "settings": {
+          "odataVersion": "4.0"
+        }
+      }
+    },
+    "offline": false,
+    "crossNavigation": {
+      "inbounds": {
+        "serviceorders-display": {
+          "semanticObject": "CarService",
+          "action": "manage",
+          "title": "{{appTitle}}",
+          "signature": {
+            "parameters": {},
+            "additionalParameters": "allowed"
+          }
+        }
+      }
+    }
+  },
+  "sap.ui": {
+    "technology": "UI5",
+    "deviceTypes": {
+      "desktop": true,
+      "tablet": true,
+      "phone": true
+    }
+  },
+  "sap.ui5": {
+    "flexEnabled": false,
+    "dependencies": {
+      "minUI5Version": "1.120.15",
+      "libs": {
+        "sap.m": {},
+        "sap.ui.core": {},
+        "sap.fe.templates": {},
+        "sap.fe.core": {}
+      }
+    },
+    "models": {
+      "i18n": {
+        "type": "sap.ui.model.resource.ResourceModel",
+        "settings": {
+          "bundleName": "serviceorders.i18n.i18n",
+          "bundleUrl": "i18n/i18n.properties",
+          "supportedLocales": [
+            "",
+            "en"
+          ],
+          "fallbackLocale": "",
+          "enhanceWithParentLocales": false
+        }
+      },
+      "": {
+        "dataSource": "mainService",
+        "preload": true,
+        "settings": {
+          "synchronizationMode": "None",
+          "operationMode": "Server",
+          "autoExpandSelect": true,
+          "earlyRequests": true
+        }
+      }
+    },
+    "routing": {
+      "config": {},
+      "routes": [
+        {
+          "pattern": ":?query:",
+          "name": "ServiceOrdersList",
+          "target": "ServiceOrdersList"
+        },
+        {
+          "pattern": "ServiceOrders({key}):?query:",
+          "name": "ServiceOrdersObjectPage",
+          "target": "ServiceOrdersObjectPage"
+        }
+      ],
+      "targets": {
+        "ServiceOrdersList": {
+          "type": "Component",
+          "id": "ServiceOrdersList",
+          "name": "sap.fe.templates.ListReport",
+          "options": {
+            "settings": {
+              "contextPath": "/ServiceOrders",
+              "entitySet": "ServiceOrders",
+              "variantManagement": "Page",
+              "navigation": {
+                "ServiceOrders": {
+                  "detail": {
+                    "route": "ServiceOrdersObjectPage"
+                  }
+                }
+              },
+              "controlConfiguration": {
+                "@com.sap.vocabularies.UI.v1.LineItem": {
+                  "tableSettings": {
+                    "type": "ResponsiveTable"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "ServiceOrdersObjectPage": {
+          "type": "Component",
+          "id": "ServiceOrdersObjectPage",
+          "name": "sap.fe.templates.ObjectPage",
+          "options": {
+            "settings": {
+              "contextPath": "/ServiceOrders",
+              "editableHeaderContent": false
+            }
+          }
+        }
+      }
+    },
+    "contentDensities": {
+      "compact": true,
+      "cozy": true
+    }
+  },
+  "sap.fiori": {
+    "registration": {
+      "collection": "",
+      "keywords": []
+    }
+  }
+}

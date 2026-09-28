@@ -1,0 +1,94 @@
+{
+  "name": "car-service-app",
+  "version": "1.0.0",
+  "description": "SAP CAP Car Service Management application",
+  "private": true,
+  "scripts": {
+    "start": "cds-serve",
+    "watch": "cds watch",
+    "build": "cds build --production",
+    "deploy": "cds deploy --to sqlite:car-service.db",
+    "test": "node --test test/**/*.test.js"
+  },
+  "dependencies": {
+    "@cap-js/sqlite": "^3.1.1",
+    "@sap/cds": "^10.1.1",
+    "@sap/cds-fiori": "^2"
+  },
+  "cds": {
+    "requires": {
+      "db": {
+        "kind": "sqlite",
+        "credentials": {
+          "database": "car-service.db"
+        }
+      },
+      "[development]": {
+        "auth": {
+          "kind": "mocked",
+          "users": {
+            "admin": {
+              "password": "admin",
+              "roles": [
+                "Admin"
+              ]
+            },
+            "advisor": {
+              "password": "advisor",
+              "roles": [
+                "ServiceAdvisor"
+              ]
+            },
+            "mechanic1": {
+              "password": "mechanic",
+              "roles": [
+                "Mechanic"
+              ]
+            }
+          }
+        }
+      },
+      "[test]": {
+        "db": {
+          "kind": "sqlite",
+          "credentials": {
+            "database": ":memory:"
+          }
+        },
+        "auth": {
+          "kind": "mocked",
+          "users": {
+            "admin": {
+              "password": "admin",
+              "roles": [
+                "Admin"
+              ]
+            },
+            "advisor": {
+              "password": "advisor",
+              "roles": [
+                "ServiceAdvisor"
+              ]
+            },
+            "mechanic1": {
+              "password": "mechanic",
+              "roles": [
+                "Mechanic"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "server": {
+      "index": {
+        "enabled": true
+      }
+    }
+  },
+  "devDependencies": {
+    "@cap-js/cds-test": "^1.0.2",
+    "chai": "^6.2.2",
+    "chai-as-promised": "^8.0.2"
+  }
+}

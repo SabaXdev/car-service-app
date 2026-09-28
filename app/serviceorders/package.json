@@ -1,0 +1,11 @@
+{
+  "name": "serviceorders",
+  "version": "1.0.0",
+  "description": "Car Service Orders — Fiori elements List Report / Object Page",
+  "keywords": [
+    "ui5",
+    "cap",
+    "fiori-elements"
+  ],
+  "main": "webapp/index.html"
+}

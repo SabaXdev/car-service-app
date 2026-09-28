@@ -1,0 +1,4 @@
+ID,name,phone,email,isFleetCustomer
+11111111-1111-1111-1111-111111111101,Saba Kvirikashvili,+995555123456,saba.kvirikashvili@example.com,false
+11111111-1111-1111-1111-111111111102,Giorgi Beridze,+995555234567,giorgi.beridze@example.com,true
+11111111-1111-1111-1111-111111111103,Nika Gvasalia,+995555345678,nika.gvasalia@example.com,false
