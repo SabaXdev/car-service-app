@@ -54,6 +54,11 @@ entity Mechanics : cuid, managed {
                     on serviceOrders.mechanic = $self;
 }
 
+entity OrderNumberCounters {
+  key year       : Integer;
+      lastNumber : Integer not null @default: 0;
+}
+
 @assert.unique: { orderNumber: [orderNumber] }
 entity ServiceOrders : cuid, managed {
   orderNumber      : String(20)  not null;

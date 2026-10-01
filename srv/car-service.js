@@ -1,9 +1,10 @@
 const cds = require('@sap/cds');
-const { SELECT, UPDATE } = cds.ql;
+const { SELECT, UPDATE, INSERT } = cds.ql;
 const { applyEurConversion, roundMoney } = require('./lib/exchange-rates');
 
 const ACTIVE_ORDER_STATUSES = ['OPEN', 'IN_PROGRESS'];
 const TERMINAL_ORDER_STATUSES = ['COMPLETED', 'CANCELLED'];
+const ORDER_NUMBER_ALLOCATION_RETRIES = 5;
 
 const ITEM_PRICING = {
   LABOR: {
@@ -32,6 +33,10 @@ module.exports = class CarServiceService extends cds.ApplicationService {
     this.before(['CREATE', 'UPDATE', 'NEW'], orderTargets, this.onBeforeServiceOrderValidate);
     this.before(['CREATE', 'NEW'], orderTargets, this.onBeforeServiceOrderCreate);
 
+    if (ServiceOrders.drafts) {
+      this.before('SAVE', ServiceOrders.drafts, this.onBeforeServiceOrderDraftActivate);
+    }
+
     const itemTargets = [ServiceItems, ServiceItems.drafts].filter(Boolean);
     this.before(['CREATE', 'UPDATE', 'NEW'], itemTargets, this.onBeforeServiceItemSave);
     this.before(['DELETE', 'CANCEL'], itemTargets, this.onBeforeServiceItemDelete);
@@ -41,15 +46,42 @@ module.exports = class CarServiceService extends cds.ApplicationService {
     this.on('completeService', ServiceOrders, this.onCompleteService);
     this.on('cancelService', ServiceOrders, this.onCancelService);
     this.on('refreshExchangeRate', ServiceOrders, this.onRefreshExchangeRate);
+
+    this.on('error', (err, req) => translateDatabaseError(err, req));
   }
 
   async onBeforeServiceOrderCreate(req) {
     const order = req.data;
     if (!order.orderNumber) {
-      order.orderNumber = await generateOrderNumber(this.entities.ServiceOrders);
+      try {
+        order.orderNumber = await allocateOrderNumber(this.entities.ServiceOrders);
+      } catch (err) {
+        if (err.status === 409) {
+          return req.reject(409, err.message);
+        }
+        throw err;
+      }
     }
     if (!order.status) {
       order.status = 'OPEN';
+    }
+  }
+
+  async onBeforeServiceOrderDraftActivate(req) {
+    const orderId = req.params?.[req.params.length - 1]?.ID;
+    if (!orderId) {
+      return req.reject(400, 'Service order key is missing.');
+    }
+
+    const { ServiceItems } = this.entities;
+    const itemEntity = ServiceItems.drafts ?? ServiceItems;
+    let items = await SELECT.from(itemEntity).where({ serviceOrder_ID: orderId });
+    if (!items.length && ServiceItems.drafts) {
+      items = await SELECT.from(ServiceItems).where({ serviceOrder_ID: orderId });
+    }
+
+    for (const item of items) {
+      validateServiceItemPricing(req, item, { strict: true });
     }
   }
 
@@ -66,28 +98,31 @@ module.exports = class CarServiceService extends cds.ApplicationService {
         ? await SELECT.one.from(ServiceOrders).where({ ID: orderId })
         : null;
       if (!existing) {
-        req.error(404, 'Service order not found.');
+        return req.reject(404, 'Service order not found.');
       }
       if (order.status !== undefined && order.status !== existing.status) {
-        req.error(400, 'Service order status cannot be changed directly. Use startService, completeService, or cancelService.');
+        return req.reject(
+          400,
+          'Service order status cannot be changed directly. Use startService, completeService, or cancelService.'
+        );
       }
       delete order.status;
 
       if (TERMINAL_ORDER_STATUSES.includes(existing.status)) {
-        req.error(400, `Cannot modify a ${existing.status} service order.`);
+        return req.reject(400, `Cannot modify a ${existing.status} service order.`);
       }
     }
 
     if (isCreate && order.status && order.status !== 'OPEN') {
-      req.error(400, 'New service orders must start in OPEN status. Use actions to change lifecycle.');
+      return req.reject(400, 'New service orders must start in OPEN status. Use actions to change lifecycle.');
     }
 
     const serviceDate = toDate(order.serviceDate ?? existing?.serviceDate);
     if (!serviceDate) {
-      req.error(400, 'Service date is required.');
+      return req.reject(400, 'Service date is required.');
     }
     if (isCreate && serviceDate < startOfToday()) {
-      req.error(400, 'Service date cannot be in the past.');
+      return req.reject(400, 'Service date cannot be in the past.');
     }
 
     let vehicleId = await resolveForeignKey(req, 'vehicle_ID', order.vehicle);
@@ -105,23 +140,23 @@ module.exports = class CarServiceService extends cds.ApplicationService {
     }
 
     if (!vehicleId || !customerId) {
-      req.error(400, 'Customer and vehicle are required.');
+      return req.reject(400, 'Customer and vehicle are required.');
     }
 
     const mileageAtService = order.mileageAtService ?? existing?.mileageAtService;
     if (mileageAtService === undefined || mileageAtService === null) {
-      req.error(400, 'Mileage at service is required.');
+      return req.reject(400, 'Mileage at service is required.');
     }
 
     const vehicle = await SELECT.one.from(Vehicles).where({ ID: vehicleId });
     if (!vehicle) {
-      req.error(404, 'Vehicle not found.');
+      return req.reject(404, 'Vehicle not found.');
     }
     if (String(vehicle.customer_ID) !== String(customerId)) {
-      req.error(400, 'Selected vehicle does not belong to the selected customer.');
+      return req.reject(400, 'Selected vehicle does not belong to the selected customer.');
     }
     if (Number(mileageAtService) < Number(vehicle.currentMileage)) {
-      req.error(
+      return req.reject(
         400,
         `Mileage at service (${mileageAtService}) must be at least the vehicle current mileage (${vehicle.currentMileage}).`
       );
@@ -171,7 +206,7 @@ module.exports = class CarServiceService extends cds.ApplicationService {
     if (serviceOrderId) {
       const order = await SELECT.one.from(ServiceOrders).where({ ID: serviceOrderId });
       if (order && TERMINAL_ORDER_STATUSES.includes(order.status)) {
-        req.error(400, `Cannot change line items on a ${order.status} service order.`);
+        return req.reject(400, `Cannot change line items on a ${order.status} service order.`);
       }
     }
 
@@ -190,12 +225,11 @@ module.exports = class CarServiceService extends cds.ApplicationService {
       return;
     }
 
-    // after DELETE the item row is already gone
     req.data.serviceOrder_ID = existing.serviceOrder_ID;
 
     const order = await SELECT.one.from(ServiceOrders).columns('status').where({ ID: existing.serviceOrder_ID });
     if (order && TERMINAL_ORDER_STATUSES.includes(order.status)) {
-      req.error(400, `Cannot change line items on a ${order.status} service order.`);
+      return req.reject(400, `Cannot change line items on a ${order.status} service order.`);
     }
   }
 
@@ -213,13 +247,13 @@ module.exports = class CarServiceService extends cds.ApplicationService {
 
   async onStartService(req) {
     const { ServiceOrders, Mechanics } = this.entities;
-    return moveServiceOrder(req, ServiceOrders, {
+    return moveServiceOrder(req, ServiceOrders, Mechanics, {
       allowed: ['OPEN'],
       nextStatus: 'IN_PROGRESS',
       invalidStatus: (status) => `Service order must be OPEN to start (current: ${status}).`,
       prepare: (order) => {
         if (!order.mechanic_ID) {
-          req.error(400, 'Assign a mechanic before starting service.');
+          return req.reject(400, 'Assign a mechanic before starting service.');
         }
       },
       after: (order) => syncMechanicStatus(Mechanics, ServiceOrders, order.mechanic_ID),
@@ -228,7 +262,7 @@ module.exports = class CarServiceService extends cds.ApplicationService {
 
   async onCompleteService(req) {
     const { ServiceOrders, Vehicles, Mechanics } = this.entities;
-    return moveServiceOrder(req, ServiceOrders, {
+    return moveServiceOrder(req, ServiceOrders, Mechanics, {
       allowed: ['IN_PROGRESS'],
       nextStatus: 'COMPLETED',
       invalidStatus: (status) => `Service order must be IN_PROGRESS to complete (current: ${status}).`,
@@ -245,7 +279,7 @@ module.exports = class CarServiceService extends cds.ApplicationService {
 
   async onCancelService(req) {
     const { ServiceOrders, Mechanics } = this.entities;
-    return moveServiceOrder(req, ServiceOrders, {
+    return moveServiceOrder(req, ServiceOrders, Mechanics, {
       allowed: ['OPEN', 'IN_PROGRESS'],
       nextStatus: 'CANCELLED',
       invalidStatus: (status) => `Service order must be OPEN or IN_PROGRESS to cancel (current: ${status}).`,
@@ -262,7 +296,7 @@ module.exports = class CarServiceService extends cds.ApplicationService {
     const order = await loadServiceOrderByRequest(req, ServiceOrders);
 
     if (order.status === 'CANCELLED') {
-      req.error(400, 'Cannot refresh exchange rate on a cancelled service order.');
+      return req.reject(400, 'Cannot refresh exchange rate on a cancelled service order.');
     }
 
     const costs = { totalCostGEL: order.totalCostGEL, currency: 'GEL' };
@@ -291,12 +325,32 @@ function persistenceOf(entities, req) {
   };
 }
 
-function priceServiceItem(req, item) {
+function isMechanicOnlyUser(req) {
+  return req.user?.is?.('Mechanic') && !req.user?.is?.('Admin') && !req.user?.is?.('ServiceAdvisor');
+}
+
+async function assertMechanicOrderOwnership(req, order, Mechanics) {
+  if (!isMechanicOnlyUser(req)) {
+    return;
+  }
+
+  if (!order.mechanic_ID) {
+    return req.reject(403, 'You are not assigned to this service order.');
+  }
+
+  const mechanic = await SELECT.one.from(Mechanics).where({ ID: order.mechanic_ID });
+  const userId = req.user?.id;
+  if (!mechanic?.authUser || mechanic.authUser !== userId) {
+    return req.reject(403, 'You can only perform this action on service orders assigned to you.');
+  }
+}
+
+function validateServiceItemPricing(req, item, { strict = false } = {}) {
   const itemType = (item.itemType || '').toUpperCase();
   const pricing = ITEM_PRICING[itemType];
   if (!pricing) {
-    if (!isDraftRequest(req)) {
-      req.error(400, 'Item type must be LABOR or PART.');
+    if (strict) {
+      return req.reject(400, 'Item type must be LABOR or PART.');
     }
     return;
   }
@@ -306,6 +360,7 @@ function priceServiceItem(req, item) {
   const price = Number(item[pricing.priceField]);
   const amountOk = Number.isFinite(amount) && amount > 0;
   const priceOk = Number.isFinite(price) && price >= 0;
+
   if (amountOk && priceOk) {
     item.lineTotal = roundMoney(amount * price);
     for (const field of pricing.clearFields) {
@@ -314,15 +369,19 @@ function priceServiceItem(req, item) {
     return;
   }
 
-  if (isDraftRequest(req)) {
+  if (!strict) {
     return;
   }
   if (!amountOk) {
-    req.error(400, pricing.amountError);
+    return req.reject(400, pricing.amountError);
   }
   if (!priceOk) {
-    req.error(400, pricing.priceError);
+    return req.reject(400, pricing.priceError);
   }
+}
+
+function priceServiceItem(req, item) {
+  validateServiceItemPricing(req, item, { strict: !isDraftRequest(req) });
 }
 
 async function recalculateOrderTotals(entities, serviceOrderId, warn) {
@@ -362,7 +421,7 @@ async function recalculateOrderTotals(entities, serviceOrderId, warn) {
 async function validateMechanicAssignment(req, { ServiceOrders, Mechanics, mechanicId, excludeOrderId }) {
   const mechanic = await SELECT.one.from(Mechanics).where({ ID: mechanicId });
   if (!mechanic) {
-    req.error(404, 'Mechanic not found.');
+    return req.reject(404, 'Mechanic not found.');
   }
 
   const conditions = {
@@ -375,7 +434,7 @@ async function validateMechanicAssignment(req, { ServiceOrders, Mechanics, mecha
 
   const conflicting = await SELECT.from(ServiceOrders).where(conditions);
   if (conflicting.length > 0) {
-    req.error(409, 'Mechanic is already assigned to another active service order.');
+    return req.reject(409, 'Mechanic is already assigned to another active service order.');
   }
 
   if (mechanic.status === 'BUSY') {
@@ -385,7 +444,7 @@ async function validateMechanicAssignment(req, { ServiceOrders, Mechanics, mecha
       ...(excludeOrderId ? { ID: { '!=': excludeOrderId } } : {}),
     });
     if (inProgress) {
-      req.error(400, 'Mechanic is marked BUSY and has an order in progress.');
+      return req.reject(400, 'Mechanic is marked BUSY and has an order in progress.');
     }
   }
 }
@@ -407,10 +466,12 @@ async function syncMechanicStatus(Mechanics, ServiceOrders, mechanicId) {
   }
 }
 
-async function generateOrderNumber(ServiceOrders) {
-  const year = new Date().getUTCFullYear();
-  const prefix = `SO-${year}-`;
+function orderNumberCountersEntity() {
+  return cds.model.definitions['com.carservice.OrderNumberCounters'];
+}
 
+async function maxOrderSequenceForYear(ServiceOrders, year) {
+  const prefix = `SO-${year}-`;
   const rows = await SELECT.from(ServiceOrders)
     .columns('orderNumber')
     .where({ orderNumber: { like: `${prefix}%` } });
@@ -422,9 +483,56 @@ async function generateOrderNumber(ServiceOrders) {
       maxSeq = Math.max(maxSeq, parseInt(match[1], 10));
     }
   }
+  return maxSeq;
+}
 
-  const next = String(maxSeq + 1).padStart(4, '0');
-  return `${prefix}${next}`;
+async function allocateOrderNumber(ServiceOrders) {
+  const year = new Date().getUTCFullYear();
+  const prefix = `SO-${year}-`;
+  const Counters = orderNumberCountersEntity();
+
+  for (let attempt = 0; attempt < ORDER_NUMBER_ALLOCATION_RETRIES; attempt++) {
+    try {
+      return await cds.tx(async () => {
+        let counter = await SELECT.one.from(Counters).where({ year });
+        if (!counter) {
+          const seededMax = await maxOrderSequenceForYear(ServiceOrders, year);
+          try {
+            await INSERT.into(Counters).entries({ year, lastNumber: seededMax });
+            counter = { year, lastNumber: seededMax };
+          } catch (insertErr) {
+            if (!isUniqueConstraintError(insertErr)) {
+              throw insertErr;
+            }
+            counter = await SELECT.one.from(Counters).where({ year });
+            if (!counter) {
+              throw insertErr;
+            }
+          }
+        }
+
+        const nextSeq = counter.lastNumber + 1;
+        await UPDATE(Counters).set({ lastNumber: nextSeq }).where({ year });
+        return `${prefix}${String(nextSeq).padStart(4, '0')}`;
+      });
+    } catch (err) {
+      if (isUniqueConstraintError(err) && attempt < ORDER_NUMBER_ALLOCATION_RETRIES - 1) {
+        continue;
+      }
+      if (isUniqueConstraintError(err)) {
+        const conflict = new Error(
+          'Could not allocate a unique order number due to concurrent requests. Please retry.'
+        );
+        conflict.status = 409;
+        throw conflict;
+      }
+      throw err;
+    }
+  }
+
+  const conflict = new Error('Could not allocate a unique order number due to concurrent requests. Please retry.');
+  conflict.status = 409;
+  throw conflict;
 }
 
 function toDate(value) {
@@ -459,11 +567,11 @@ async function loadServiceOrderByRequest(req, ServiceOrders) {
   const keys = req.params?.length ? req.params[req.params.length - 1] : req.data;
   const ID = keys?.ID;
   if (!ID) {
-    req.error(400, 'Service order key is missing.');
+    return req.reject(400, 'Service order key is missing.');
   }
   const order = await SELECT.one.from(ServiceOrders).where({ ID });
   if (!order) {
-    req.error(404, 'Service order not found.');
+    return req.reject(404, 'Service order not found.');
   }
   return order;
 }
@@ -478,10 +586,12 @@ async function resolveOrderIdFromItemRequest(req, ServiceItems) {
   return item?.serviceOrder_ID ?? null;
 }
 
-async function moveServiceOrder(req, ServiceOrders, { allowed, nextStatus, invalidStatus, prepare, after }) {
+async function moveServiceOrder(req, ServiceOrders, Mechanics, { allowed, nextStatus, invalidStatus, prepare, after }) {
   const order = await loadServiceOrderByRequest(req, ServiceOrders);
+  await assertMechanicOrderOwnership(req, order, Mechanics);
+
   if (!allowed.includes(order.status)) {
-    req.error(400, invalidStatus(order.status));
+    return req.reject(400, invalidStatus(order.status));
   }
   if (prepare) {
     await prepare(order);
@@ -491,4 +601,31 @@ async function moveServiceOrder(req, ServiceOrders, { allowed, nextStatus, inval
     await after(order);
   }
   return SELECT.one.from(ServiceOrders).where({ ID: order.ID });
+}
+
+function isUniqueConstraintError(err) {
+  const message = String(err?.message || err?.original?.message || '');
+  return (
+    err?.code === 'SQLITE_CONSTRAINT' ||
+    err?.code === 'SQLITE_CONSTRAINT_UNIQUE' ||
+    /unique constraint failed/i.test(message)
+  );
+}
+
+function translateDatabaseError(err, req) {
+  if (!isUniqueConstraintError(err)) {
+    return;
+  }
+
+  const message = String(err?.message || err?.original?.message || '');
+  if (/orderNumber/i.test(message)) {
+    req.error(
+      409,
+      'A service order with this order number already exists. Please retry creating the service order.'
+    );
+    return false;
+  }
+
+  req.error(409, 'The request conflicts with existing data.');
+  return false;
 }
